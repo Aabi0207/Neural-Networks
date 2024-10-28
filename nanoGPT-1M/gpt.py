@@ -81,3 +81,94 @@ class Head(nn.Module):
         v = self.value(x) #B, T, HS
         out = wei @ v # B,T, HS
         return out
+
+
+class MultiHeadAttention(nn.Module):
+    def __init__(self, head_size):
+        super().__init__()
+        self.heads = nn.ModuleList([Head(head_size) for _ in range(n_head)])
+        self.proj = nn.Linear(n_head*head_size, n_embd)
+        self.dropout = nn.Dropout(dropout)
+    
+    def forward(self, x):
+        out = torch.cat([h(x) for h in self.heads], dim=-1)   # B,T,HS*N_HEAD
+        out = self.proj(out) # B,T,C
+        out = self.dropout(out)
+        return out
+
+
+class FeedForward(nn.Module):
+    def __init__(self, n_embd):
+        super.__init__()
+        self.net = nn.Sequential([
+            nn.Linear(n_embd, n_embd*4),
+            nn.ReLU(),
+            nn.Linear(n_embd*4, n_embd),
+            nn.Dropout(dropout)
+        ])
+
+    def forward(self, x):
+        return self.net(x)  #B,T,C
+
+
+class Block(nn.Module):
+    def __init__(self, n_embd, n_head):
+        super().__init__()
+        head_size = n_embd // n_head
+        self.sa = MultiHeadAttention(head_size)
+        self.ffw = FeedForward(n_embd)
+        self.ln1 = nn.LayerNorm(n_embd)
+        self.ln2 = nn.LayerNorm(n_embd)
+    
+    def forward(self, x):
+        x = x + self.sa(self.ln1(x))
+        x = x + self.ffw(self.ln2(x))
+        return x   # B,T,C
+
+
+class GPTLanguageModel(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.token_embedding_table = nn.Embedding(vocab_size, n_embd)
+        self.position_embedding_table = nn.Embedding(block_size, n_embd)
+        self.blocks = nn.Sequential(*[Block(n_embd, n_head=n_head) for _ in range(n_layer)])
+        self.lnf = nn.LayerNorm(n_embd)
+        self.lif = nn.Linear(n_embd, vocab_size)
+
+        self.apply(self._init_weights)
+
+    def _init_weights(self, model):
+        if isinstance(model, nn.Linear):
+            torch.nn.init.normal_(model.weight, mean=0.0, std=0.02)
+            if model.bias is not None:
+                torch.nn.init.zeros_(model.bias)
+        if isinstance(model, nn.Embedding):
+            torch.nn.init.normal_(model.weight, mean=0.0, std=0.02)
+
+    def forward(self, idx, target=None):
+        B, T = idx.shape
+        x = self.token_embedding_table(idx) + self.position_embedding_table(torch.arange(T, device=device))
+        x = self.blocks(x)
+        x = self.lnf(x)
+        logits = self.lif(x)
+
+        if target is None:
+            loss = None
+        else:
+            B, T, C = logits.shape
+            logits = logits.view(B*T, C)
+            targets = targets.view(B*T)
+            loss = F.cross_entropy(logits, targets)
+
+        return logits, loss
+
+    def generate(self, idx, max_token):
+        for _ in range(max_token):
+            idx_cond = idx[:, -block_size:]
+            logits, _ = self(idx_cond)
+            probs = nn.Softmax(logits)
+            idx_next = torch.multinomial(probs, num_samples=1)
+            idx = torch.cat((idx, idx_next), dim=-1)
+        return idx
+
+
