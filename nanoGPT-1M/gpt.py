@@ -49,7 +49,7 @@ def estimate_loss():
     out = {}
     model.eval()
     for split in ['train', 'test']:
-        losses = torch.zeros(eval_iter)
+        losses = torch.zeros(eval_iter, device=device)
         for i in range(eval_iter):
             x, y = get_batch(split)
             _, loss = model(x, y)
@@ -66,7 +66,7 @@ class Head(nn.Module):
         super().__init__()
         self.key = nn.Linear(n_embd, head_size, bias=False)
         self.query = nn.Linear(n_embd, head_size, bias=False)
-        self.value =nn.Linear(n_embd, head_size=False)
+        self.value =nn.Linear(n_embd, head_size, bias=False)
         self.dropout = nn.Dropout(dropout)
         self.register_buffer('tril', torch.tril(torch.ones(block_size, block_size)))
 
@@ -75,8 +75,8 @@ class Head(nn.Module):
         k = self.key(x)  # B, T, hs
         q = self.query(x)# B, T, hs
         wei = q @ k.transpose(-2, -1) * k.shape[-1]**-0.5  # B, T, HS @ B, HS, T == B, T, T
-        wei = wei.masked_fill(self.tril[:T, :T]==0, float('inf'))
-        wei = nn.Softmax(wei, dim=-1)
+        wei = wei.masked_fill(self.tril[:T, :T]==0, float('-inf'))
+        wei = F.softmax(wei, dim=-1)
         wei = self.dropout(wei)
         v = self.value(x) #B, T, HS
         out = wei @ v # B,T, HS
@@ -99,13 +99,13 @@ class MultiHeadAttention(nn.Module):
 
 class FeedForward(nn.Module):
     def __init__(self, n_embd):
-        super.__init__()
-        self.net = nn.Sequential([
+        super().__init__()
+        self.net = nn.Sequential(
             nn.Linear(n_embd, n_embd*4),
             nn.ReLU(),
-            nn.Linear(n_embd*4, n_embd),
-            nn.Dropout(dropout)
-        ])
+            nn.Linear(4*n_embd, n_embd),
+            nn.Dropout(dropout),
+        )
 
     def forward(self, x):
         return self.net(x)  #B,T,C
@@ -157,8 +157,8 @@ class GPTLanguageModel(nn.Module):
         else:
             B, T, C = logits.shape
             logits = logits.view(B*T, C)
-            targets = targets.view(B*T)
-            loss = F.cross_entropy(logits, targets)
+            target = target.view(B*T)
+            loss = F.cross_entropy(logits, target)
 
         return logits, loss
 
@@ -166,9 +166,35 @@ class GPTLanguageModel(nn.Module):
         for _ in range(max_token):
             idx_cond = idx[:, -block_size:]
             logits, _ = self(idx_cond)
-            probs = nn.Softmax(logits)
+            probs = F.softmax(logits[:, -1, :], dim=-1)
             idx_next = torch.multinomial(probs, num_samples=1)
             idx = torch.cat((idx, idx_next), dim=-1)
         return idx
 
 
+model = GPTLanguageModel().to(device)
+
+print(sum(p.numel() for p in model.parameters()))
+
+opt = torch.optim.AdamW(model.parameters(), lr=lr)
+
+for i in range(max_iter):
+    # forward pass
+    xb, yb = get_batch('train')
+    logits, loss = model(xb, yb)
+
+    # backward pass
+    opt.zero_grad(set_to_none=True)
+    loss.backward()
+    opt.step()
+
+    # every once in a while evaluate the loss on train and val sets
+    if i % eval_interval == 0 or i == max_iter - 1:
+        losses = estimate_loss()
+        print(f"step {i}: train loss {losses['train']:.4f}, val loss {losses['test']:.4f}")
+
+    
+# generate from the model
+context = torch.zeros((1, 1), dtype=torch.long, device=device)
+print(decode(model.generate(context, 500)[0].tolist()))
+#open('more.txt', 'w').write(decode(model.generate(context, max_new=10000)[0].tolist()))
